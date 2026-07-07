@@ -1,6 +1,7 @@
 from PyQt6.QtCore import QObject, QProcess, QDir, pyqtSignal
 from PyQt6.QtWidgets import QFileDialog
 import os
+import ast
 
 class EditorController(QObject):
     """
@@ -37,6 +38,7 @@ class EditorController(QObject):
         self.view.file_selected.connect(self.open_file)
         self.view.connection_double_clicked.connect(self.navigate_to_connection)
         self.view.create_sibling_requested.connect(self.create_sibling_file)
+        self.view.browse_sibling_requested.connect(self.browse_sibling_file)
         self.view.sync_nav_toggled.connect(self.set_sync_nav)
 
         # Track cursor and text edits in editors
@@ -128,10 +130,14 @@ class EditorController(QObject):
         
         # Initial connections update
         self.model.update_connections()
+        
+        # Update Workspace Dashboard
+        self.update_view_dashboard()
 
     def find_mvc_triad(self, path: str):
         """
-        Calculates MVC sibling paths using sibling folders or suffix matching.
+        Calculates MVC sibling paths using imports inside the file (if it's an entry point),
+        or sibling folders/suffixes if it's one of the MVC files.
         """
         path = os.path.abspath(path)
         dirname = os.path.dirname(path)
@@ -140,6 +146,11 @@ class EditorController(QObject):
         
         if ext != '.py':
             return None, None, None
+
+        # Check if this is an entry point file (like main.py) and resolve from its imports
+        m_path, v_path, c_path = self.find_triad_from_imports(path)
+        if m_path or v_path or c_path:
+            return m_path, v_path, c_path
 
         parent_folder = os.path.basename(dirname).lower()
         model_path = None
@@ -207,6 +218,65 @@ class EditorController(QObject):
                 controller_path = os.path.join(dirname, f"{core_name}_controller.py")
 
         return model_path, view_path, controller_path
+
+    def find_triad_from_imports(self, path: str):
+        """
+        Parses a python file to extract imports and maps them to model, view, and controller paths.
+        """
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                content = f.read()
+            tree = ast.parse(content)
+        except Exception:
+            return None, None, None
+
+        imported_modules = []
+        
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                if node.module:
+                    imported_modules.append((node.module, [n.name for n in node.names]))
+            elif isinstance(node, ast.Import):
+                for n in node.names:
+                    imported_modules.append((n.name, []))
+
+        workspace = self.model.workspace_path or os.path.dirname(path)
+        m_path, v_path, c_path = None, None, None
+
+        for mod_name, names in imported_modules:
+            parts = mod_name.split('.')
+            relative_file = os.path.join(*parts) + ".py"
+            
+            # Check relative to workspace, then relative to source dir
+            full_path = os.path.join(workspace, relative_file)
+            if not os.path.exists(full_path):
+                full_path = os.path.join(os.path.dirname(path), relative_file)
+                
+            # Check package init
+            if not os.path.exists(full_path):
+                relative_init = os.path.join(*parts, "__init__.py")
+                full_init = os.path.join(workspace, relative_init)
+                if os.path.exists(full_init):
+                    full_path = full_init
+                else:
+                    full_init = os.path.join(os.path.dirname(path), relative_init)
+                    if os.path.exists(full_init):
+                        full_path = full_init
+
+            if os.path.exists(full_path):
+                path_lower = full_path.lower()
+                is_model = 'model' in path_lower or any('model' in n.lower() for n in names)
+                is_view = 'view' in path_lower or any('view' in n.lower() for n in names)
+                is_controller = 'controller' in path_lower or any('controller' in n.lower() for n in names)
+
+                if is_model:
+                    m_path = full_path
+                elif is_view:
+                    v_path = full_path
+                elif is_controller:
+                    c_path = full_path
+
+        return m_path, v_path, c_path
 
     # Lazy Sibling Creation
     def create_sibling_file(self, role: str, template_ref: str):
@@ -304,6 +374,52 @@ class EditorController(QObject):
                 self.open_file(non_empty_paths[0])
         except Exception as e:
             self.model.trigger_status_message(f"Error creating sibling: {str(e)}")
+
+    def browse_sibling_file(self, role: str):
+        """
+        Allows the user to manually select a Python file to associate as the sibling for the given MVC role.
+        """
+        start_dir = self.model.workspace_path or ""
+        active_paths = [self.model.get_path('model'), self.model.get_path('view'), self.model.get_path('controller')]
+        valid_paths = [p for p in active_paths if p and os.path.exists(p)]
+        if valid_paths:
+            start_dir = os.path.dirname(valid_paths[0])
+            
+        file_path, _ = QFileDialog.getOpenFileName(
+            self.view, f"Select Python File for {role.upper()}", 
+            start_dir, "Python Files (*.py);;All Files (*)"
+        )
+        if file_path:
+            self._is_loading = True
+            self.model._triad_paths[role] = file_path
+            
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+                
+                pane = getattr(self.view, f"{role}_pane")
+                pane.set_file_path(file_path, exists=True)
+                pane.editor.setPlainText(content)
+                self.model.set_content(role, content, mark_dirty=False)
+                self.model.trigger_status_message(f"Associated {role} with: {os.path.basename(file_path)}")
+                self.model.update_connections()
+                self.update_view_dashboard()
+            except Exception as e:
+                self.model.trigger_status_message(f"Error loading associated file: {str(e)}")
+                
+            self._is_loading = False
+
+    def update_view_dashboard(self):
+        """
+        Updates the status dashboard in the Workspace Tab.
+        """
+        model_path = self.model.get_path('model')
+        view_path = self.model.get_path('view')
+        controller_path = self.model.get_path('controller')
+        
+        for role, path in [('model', model_path), ('view', view_path), ('controller', controller_path)]:
+            exists = os.path.exists(path) if path else False
+            self.view.set_dashboard_role_status(role, path or "", exists)
 
     # Text Syncing & Dirty State Management
     def update_model_content(self, role: str):

@@ -167,6 +167,8 @@ class PyCodeEditor(QPlainTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.line_number_area = LineNumberArea(self)
+        self.target_line = None
+        self.target_highlight_color = QColor("#3e302f")
 
         # Style font
         font = QFont("Consolas", 11)
@@ -254,6 +256,8 @@ class PyCodeEditor(QPlainTextEdit):
 
     def highlight_current_line(self):
         extra_selections = []
+        
+        # 1. Subtle current line cursor highlight
         if not self.isReadOnly():
             selection = QTextEdit.ExtraSelection()
             selection.format.setBackground(QColor("#1e1e2e"))  # Subtle active-line highlight
@@ -261,9 +265,41 @@ class PyCodeEditor(QPlainTextEdit):
             selection.cursor = self.textCursor()
             selection.cursor.clearSelection()
             extra_selections.append(selection)
+            
+        # 2. Bright target line highlight
+        if getattr(self, 'target_line', None) is not None:
+            doc = self.document()
+            block = doc.findBlockByLineNumber(self.target_line - 1)
+            if block.isValid():
+                selection = QTextEdit.ExtraSelection()
+                selection.format.setBackground(self.target_highlight_color)
+                selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
+                
+                cursor = self.textCursor()
+                cursor.setPosition(block.position())
+                cursor.clearSelection()
+                selection.cursor = cursor
+                
+                extra_selections.append(selection)
+                
         self.setExtraSelections(extra_selections)
 
+    def highlight_target_line(self, line: int, color_hex: str = "#3e302f"):
+        self.target_line = line
+        self.target_highlight_color = QColor(color_hex)
+        self.highlight_current_line()
+
+    def mousePressEvent(self, event):
+        # Clear target line highlight on manual mouse clicks
+        self.target_line = None
+        self.highlight_current_line()
+        super().mousePressEvent(event)
+
     def keyPressEvent(self, event):
+        # Clear target line highlight on manual typing
+        self.target_line = None
+        self.highlight_current_line()
+        
         # Override Tab to insert 4 spaces
         if event.key() == Qt.Key.Key_Tab:
             self.insertPlainText("    ")
@@ -323,6 +359,7 @@ class EditorPane(QWidget):
     """
     jump_to_line_requested = pyqtSignal(int)
     create_clicked = pyqtSignal(str) # role
+    browse_clicked = pyqtSignal(str) # role
 
     def __init__(self, role: str, title: str, accent_color: str, parent=None):
         super().__init__(parent)
@@ -429,6 +466,11 @@ class EditorPane(QWidget):
         self.placeholder_label.setStyleSheet("color: #6c7086; font-size: 12px; font-weight: 500; line-height: 16px;")
         placeholder_layout.addWidget(self.placeholder_label)
 
+        # Horizontal button row inside placeholder
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+        btn_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
         self.create_btn = QPushButton(f"Create {self.title}")
         self.create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.create_btn.setStyleSheet(f"""
@@ -437,16 +479,37 @@ class EditorPane(QWidget):
                 color: #11111b;
                 border: none;
                 border-radius: 4px;
-                padding: 6px 16px;
+                padding: 6px 14px;
                 font-weight: bold;
-                font-size: 12px;
+                font-size: 11px;
             }}
             QPushButton:hover {{
                 background-color: #cdd6f4;
             }}
         """)
         self.create_btn.clicked.connect(lambda: self.create_clicked.emit(self.role))
-        placeholder_layout.addWidget(self.create_btn, 0, Qt.AlignmentFlag.AlignCenter)
+        btn_layout.addWidget(self.create_btn)
+
+        self.browse_btn = QPushButton("Browse...")
+        self.browse_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.browse_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: #45475a;
+                color: #cdd6f4;
+                border: 1px solid #585b70;
+                border-radius: 4px;
+                padding: 5px 14px;
+                font-weight: bold;
+                font-size: 11px;
+            }}
+            QPushButton:hover {{
+                background-color: #585b70;
+            }}
+        """)
+        self.browse_btn.clicked.connect(lambda: self.browse_clicked.emit(self.role))
+        btn_layout.addWidget(self.browse_btn)
+
+        placeholder_layout.addLayout(btn_layout)
 
         self.main_layout.addWidget(self.placeholder)
         self.placeholder.hide()
@@ -593,6 +656,15 @@ class EditorPane(QWidget):
         doc = self.editor.document()
         block = doc.findBlockByLineNumber(line - 1)
         if block.isValid():
+            # Get role-specific highlight color
+            colors = {
+                'model': '#203d29',        # Soft green
+                'view': '#3d253a',         # Soft pink/magenta
+                'controller': '#1d2c40'    # Soft blue
+            }
+            color_hex = colors.get(self.role, '#3e302f')
+            self.editor.highlight_target_line(line, color_hex)
+            
             cursor = self.editor.textCursor()
             cursor.setPosition(block.position())
             self.editor.setTextCursor(cursor)
