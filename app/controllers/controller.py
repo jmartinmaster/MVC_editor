@@ -1,3 +1,19 @@
+# app/controllers/controller.py - Controller implementation for MVC Sync Editor
+# Copyright (C) 2026 Jamie Martin
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 from PyQt6.QtCore import QObject, QProcess, QDir, pyqtSignal
 from PyQt6.QtWidgets import QFileDialog
 import os
@@ -40,6 +56,7 @@ class EditorController(QObject):
         self.view.create_sibling_requested.connect(self.create_sibling_file)
         self.view.browse_sibling_requested.connect(self.browse_sibling_file)
         self.view.sync_nav_toggled.connect(self.set_sync_nav)
+        self.view.about_triggered.connect(self.show_about_dialog)
 
         # Track cursor and text edits in editors
         self.view.model_pane.editor.cursorPositionChanged.connect(lambda: self.track_cursor('model'))
@@ -642,3 +659,8 @@ class EditorController(QObject):
             if not self.process.waitForFinished(2000):
                 self.process.kill()
             self.view.set_running_state(False)
+
+    def show_about_dialog(self):
+        from app.views.about import AboutDialog
+        dialog = AboutDialog(self.view)
+        dialog.exec()
